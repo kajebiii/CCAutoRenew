@@ -195,12 +195,7 @@ start_claude_session() {
         selected_message=$(cat "$MESSAGE_FILE")
         log_message "Using custom message: \"$selected_message\""
     else
-        # Define an array of predefined messages
-        local messages=("hi" "hello" "hey there" "good day" "greetings" "howdy" "what's up" "salutations")
-        
-        # Randomly select a message from the array
-        local random_index=$((RANDOM % ${#messages[@]}))
-        selected_message="${messages[$random_index]}"
+        selected_message="Search the web for today's top 5 news headlines from South Korea and top 5 from the United States. For each headline, provide the source and a one-sentence summary. Format it nicely."
     fi
     
     # Simple approach - macOS compatible
@@ -209,9 +204,9 @@ start_claude_session() {
     (unset CLAUDECODE; echo "$selected_message" | claude >> "$LOG_FILE" 2>&1) &
     local pid=$!
     
-    # Wait up to 10 seconds
+    # Wait up to 120 seconds (news search + summary needs more time)
     local count=0
-    while kill -0 $pid 2>/dev/null && [ $count -lt 10 ]; do
+    while kill -0 $pid 2>/dev/null && [ $count -lt 120 ]; do
         sleep 1
         ((count++))
     done
