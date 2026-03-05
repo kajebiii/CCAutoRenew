@@ -335,19 +335,19 @@ main() {
             log_message "🛑 Stop time reached. Scheduling restart for tomorrow..."
             schedule_next_day_restart
             
-            # Wait for tomorrow's start time
+            # Wait for tomorrow's start time (short sleep to survive macOS sleep)
+            last_wait_log=0
             while ! is_monitoring_active; do
-                time_until_start=$(get_time_until_start)
-                hours=$((time_until_start / 3600))
-                minutes=$(((time_until_start % 3600) / 60))
-                
-                if [ "$hours" -gt 0 ]; then
+                current_epoch=$(date +%s)
+                # Log at most once every 30 minutes to avoid spam
+                if [ $((current_epoch - last_wait_log)) -ge 1800 ]; then
+                    time_until_start=$(get_time_until_start)
+                    hours=$((time_until_start / 3600))
+                    minutes=$(((time_until_start % 3600) / 60))
                     log_message "⏰ Waiting for tomorrow's start time (${hours}h ${minutes}m remaining)..."
-                    sleep 3600  # Check every hour when waiting for tomorrow
-                else
-                    log_message "⏰ Waiting for start time (${minutes}m remaining)..."
-                    sleep 300   # Check every 5 minutes when close
+                    last_wait_log=$current_epoch
                 fi
+                sleep 30
             done
             
             log_message "🌅 New day started! Resuming monitoring..."
@@ -356,40 +356,27 @@ main() {
         
         # Check if we're in monitoring window
         if ! is_monitoring_active; then
-            # Calculate time until start or reason for inactivity
-            if [ -f "$START_TIME_FILE" ]; then
-                time_until_start=$(get_time_until_start)
-                hours=$((time_until_start / 3600))
-                minutes=$(((time_until_start % 3600) / 60))
-                seconds=$((time_until_start % 60))
-                
-                if [ "$time_until_start" -gt 0 ]; then
-                    # Before start time
-                    if [ "$hours" -gt 0 ]; then
+            current_epoch=$(date +%s)
+            # Log at most once every 30 minutes
+            if [ $((current_epoch - ${_inactive_last_log:-0})) -ge 1800 ]; then
+                if [ -f "$START_TIME_FILE" ]; then
+                    time_until_start=$(get_time_until_start)
+                    if [ "$time_until_start" -gt 0 ]; then
+                        hours=$((time_until_start / 3600))
+                        minutes=$(((time_until_start % 3600) / 60))
                         log_message "⏰ Waiting for start time (${hours}h ${minutes}m remaining)..."
-                        sleep 300  # Check every 5 minutes when waiting
-                    elif [ "$minutes" -gt 2 ]; then
-                        log_message "⏰ Waiting for start time (${minutes}m ${seconds}s remaining)..."
-                        sleep 60   # Check every minute when close
-                    elif [ "$time_until_start" -gt 10 ]; then
-                        log_message "⏰ Waiting for start time (${minutes}m ${seconds}s remaining)..."
-                        sleep 10   # Check every 10 seconds when very close
                     else
-                        log_message "⏰ Waiting for start time (${seconds}s remaining)..."
-                        sleep 2    # Check every 2 seconds when imminent
+                        log_message "🛑 Past stop time, waiting for tomorrow..."
                     fi
                 else
-                    # Past stop time, waiting for tomorrow
-                    log_message "🛑 Past stop time, waiting for tomorrow..."
-                    sleep 300
+                    log_message "🛑 Past stop time, no restart scheduled..."
                 fi
-            else
-                # No start time but inactive - must be past stop time
-                log_message "🛑 Past stop time, no restart scheduled..."
-                sleep 300
+                _inactive_last_log=$current_epoch
             fi
+            sleep 30
             continue
         fi
+        _inactive_last_log=0
         
         # If we just entered active time, log it
         if [ -f "$START_TIME_FILE" ]; then
