@@ -92,12 +92,22 @@ schedule_next_day_restart() {
         stop_epoch=$(cat "$STOP_TIME_FILE")
     fi
     
-    # Calculate tomorrow's start time
+    # Calculate next start/stop, rolling forward enough days to land in the future.
+    # Prevents getting stuck when the daemon has been offline for more than a day.
+    local current_epoch=$(date +%s)
     local next_start=$((start_epoch + 86400))
     local next_stop=""
-    
+
     if [ -n "$stop_epoch" ]; then
         next_stop=$((stop_epoch + 86400))
+        while [ "$next_stop" -le "$current_epoch" ]; do
+            next_start=$((next_start + 86400))
+            next_stop=$((next_stop + 86400))
+        done
+    else
+        while [ "$next_start" -le "$current_epoch" ]; do
+            next_start=$((next_start + 86400))
+        done
     fi
     
     # Update the time files for tomorrow
