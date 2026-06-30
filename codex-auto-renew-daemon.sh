@@ -134,7 +134,39 @@ get_time_until_start() {
     fi
 }
 
-# Function to start a Codex session
+# Run a single codex call (initial exec or resume) with a timeout. Stdout captured to log.
+# Args: $1 = prompt, $2 = "initial" | "resume", $3 = timeout seconds
+run_codex_call() {
+    local prompt="$1"
+    local mode="$2"
+    local timeout_s="${3:-180}"
+
+    if [ "$mode" = "initial" ]; then
+        (echo "$prompt" | codex exec - >> "$LOG_FILE" 2>&1) &
+    else
+        (echo "$prompt" | codex exec resume --last - >> "$LOG_FILE" 2>&1) &
+    fi
+    local pid=$!
+
+    local count=0
+    while kill -0 $pid 2>/dev/null && [ $count -lt "$timeout_s" ]; do
+        sleep 1
+        ((count++))
+    done
+
+    if kill -0 $pid 2>/dev/null; then
+        kill $pid 2>/dev/null
+        wait $pid 2>/dev/null
+        return 124
+    fi
+
+    wait $pid
+    return $?
+}
+
+# Function to start a Codex session — fires a multi-turn burst so ChatGPT's
+# 5h window actually anchors. A single isolated `codex exec` call tends to
+# be classified as a one-shot and does not anchor the session reset clock.
 start_codex_session() {
     log_message "Starting Codex session for renewal..."
 
@@ -143,43 +175,51 @@ start_codex_session() {
         return 1
     fi
 
-    local selected_message=""
-
+    local initial_prompt=""
     if [ -f "$MESSAGE_FILE" ]; then
-        selected_message=$(cat "$MESSAGE_FILE")
-        log_message "Using custom message: \"$selected_message\""
+        initial_prompt=$(cat "$MESSAGE_FILE")
+        log_message "Using custom initial message: \"$initial_prompt\""
     else
-        selected_message="Search the web for today's top 5 news headlines from South Korea and top 5 from the United States. For each headline, provide the source and a one-sentence summary. Format it nicely."
+        initial_prompt="Search the web for today's top 5 news headlines from South Korea and top 5 from the United States. For each headline, provide the source and a one-sentence summary. Format it nicely."
     fi
 
-    # Run codex exec non-interactively, reading prompt from stdin.
-    (echo "$selected_message" | codex exec - >> "$LOG_FILE" 2>&1) &
-    local pid=$!
+    # Follow-up prompts (sent via `codex exec resume --last`) to create a
+    # continuous burst that ChatGPT recognises as session activity.
+    local followups=(
+        "Now give me 3 trending tech announcements from this week, with one-sentence summaries."
+        "List 5 productivity tips for a software engineer working on Mondays."
+        "Recommend one book worth reading this weekend and explain why in two sentences."
+        "Suggest 3 healthy breakfast ideas that take under 10 minutes."
+        "Name 3 interesting open-source GitHub projects that gained traction recently."
+    )
 
-    # Wait up to 180 seconds (codex exec can be slower than claude on web search)
-    local count=0
-    while kill -0 $pid 2>/dev/null && [ $count -lt 180 ]; do
-        sleep 1
-        ((count++))
-    done
-
-    if kill -0 $pid 2>/dev/null; then
-        kill $pid 2>/dev/null
-        wait $pid 2>/dev/null
-        local result=124
-    else
-        wait $pid
-        local result=$?
-    fi
-
-    if [ $result -eq 0 ] || [ $result -eq 124 ]; then
-        log_message "Codex session started successfully with message: $selected_message"
-        date +%s > "$LAST_ACTIVITY_FILE"
-        return 0
-    else
-        log_message "ERROR: Failed to start Codex session (exit=$result)"
+    # Initial call — establishes the session.
+    log_message "Burst 1/6 (initial): $initial_prompt"
+    run_codex_call "$initial_prompt" initial 180
+    local result=$?
+    if [ $result -ne 0 ] && [ $result -ne 124 ]; then
+        log_message "ERROR: Initial Codex call failed (exit=$result)"
         return 1
     fi
+    date +%s > "$LAST_ACTIVITY_FILE"
+
+    # Follow-ups — extend the burst so the 5h anchor latches in.
+    local idx=2
+    for prompt in "${followups[@]}"; do
+        sleep 20
+        log_message "Burst ${idx}/6 (resume): $prompt"
+        run_codex_call "$prompt" resume 150
+        local r=$?
+        if [ $r -ne 0 ] && [ $r -ne 124 ]; then
+            log_message "WARNING: Follow-up ${idx} failed (exit=$r) — continuing burst anyway"
+        else
+            date +%s > "$LAST_ACTIVITY_FILE"
+        fi
+        idx=$((idx + 1))
+    done
+
+    log_message "Codex session burst completed (initial + ${#followups[@]} follow-ups)"
+    return 0
 }
 
 # Sleep cadence based on last activity (5h window assumption)
