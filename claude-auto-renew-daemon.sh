@@ -211,7 +211,10 @@ start_claude_session() {
     # Simple approach - macOS compatible
     # Use a subshell with background process for timeout
     # Unset CLAUDECODE to allow launching Claude from within a Claude Code session
-    (unset CLAUDECODE; echo "$selected_message" | claude >> "$LOG_FILE" 2>&1) &
+    # Pin the renewal call to Opus explicitly so it never falls back to a
+    # model whose quota was exhausted by prior activity (e.g. Fable's monthly
+    # spend limit tripping a "Switch to another model" refusal).
+    (unset CLAUDECODE; echo "$selected_message" | claude --model opus >> "$LOG_FILE" 2>&1) &
     local pid=$!
     
     # Wait up to 120 seconds (news search + summary needs more time)
