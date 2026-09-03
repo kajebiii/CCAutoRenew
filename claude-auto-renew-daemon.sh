@@ -188,60 +188,87 @@ get_minutes_until_reset() {
     echo $((hours * 60 + minutes))
 }
 
-# Function to start Claude session
+# Run a single claude call with a timeout. Stdout captured to log.
+# Args: $1 = prompt, $2 = timeout seconds
+run_claude_call() {
+    local prompt="$1"
+    local timeout_s="${2:-120}"
+
+    (unset CLAUDECODE; echo "$prompt" | claude --model opus >> "$LOG_FILE" 2>&1) &
+    local pid=$!
+
+    local count=0
+    while kill -0 $pid 2>/dev/null && [ $count -lt "$timeout_s" ]; do
+        sleep 1
+        ((count++))
+    done
+
+    if kill -0 $pid 2>/dev/null; then
+        kill $pid 2>/dev/null
+        wait $pid 2>/dev/null
+        return 124
+    fi
+
+    wait $pid
+    return $?
+}
+
+# Fire the Claude renewal as a multi-turn burst so Claude's 5h anchor
+# actually latches onto ~08:xx instead of getting overridden by the
+# user's real morning burst later. A single isolated ping is treated
+# as a discrete blip and the anchor slides to the next real burst-end.
 start_claude_session() {
     log_message "Starting Claude session for renewal..."
-    
+
     if ! command -v claude &> /dev/null; then
         log_message "ERROR: claude command not found"
         return 1
     fi
-    
-    # Check if custom message is available
-    local selected_message=""
-    
+
+    local initial_prompt=""
     if [ -f "$MESSAGE_FILE" ]; then
-        # Use custom message
-        selected_message=$(cat "$MESSAGE_FILE")
-        log_message "Using custom message: \"$selected_message\""
+        initial_prompt=$(cat "$MESSAGE_FILE")
+        log_message "Using custom initial message: \"$initial_prompt\""
     else
-        selected_message="Search the web for today's top 5 news headlines from South Korea and top 5 from the United States. For each headline, provide the source and a one-sentence summary. Format it nicely."
+        initial_prompt="Search the web for today's top 5 news headlines from South Korea and top 5 from the United States. For each headline, provide the source and a one-sentence summary. Format it nicely."
     fi
-    
-    # Simple approach - macOS compatible
-    # Use a subshell with background process for timeout
-    # Unset CLAUDECODE to allow launching Claude from within a Claude Code session
-    # Pin the renewal call to Opus explicitly so it never falls back to a
-    # model whose quota was exhausted by prior activity (e.g. Fable's monthly
-    # spend limit tripping a "Switch to another model" refusal).
-    (unset CLAUDECODE; echo "$selected_message" | claude --model opus >> "$LOG_FILE" 2>&1) &
-    local pid=$!
-    
-    # Wait up to 120 seconds (news search + summary needs more time)
-    local count=0
-    while kill -0 $pid 2>/dev/null && [ $count -lt 120 ]; do
-        sleep 1
-        ((count++))
-    done
-    
-    # Kill if still running
-    if kill -0 $pid 2>/dev/null; then
-        kill $pid 2>/dev/null
-        wait $pid 2>/dev/null
-        local result=124  # timeout exit code
-    else
-        wait $pid
-        local result=$?
-    fi
-    
-    if [ $result -eq 0 ] || [ $result -eq 124 ]; then  # 124 is timeout exit code
-        log_message "Claude session started successfully with message: $selected_message"
-        date +%s > "$LAST_ACTIVITY_FILE"
-        return 0
-    else
-        log_message "ERROR: Failed to start Claude session"
+
+    local followups=(
+        "Now give me 3 trending tech announcements from this week, with one-sentence summaries."
+        "List 5 productivity tips for a software engineer working on Mondays."
+        "Recommend one book worth reading this weekend and explain why in two sentences."
+        "Suggest 3 healthy breakfast ideas that take under 10 minutes."
+        "Name 3 interesting open-source GitHub projects that gained traction recently."
+    )
+
+    log_message "Burst 1/6 (initial): $initial_prompt"
+    run_claude_call "$initial_prompt" 150
+    local result=$?
+    if [ $result -ne 0 ] && [ $result -ne 124 ]; then
+        log_message "ERROR: Initial Claude call failed (exit=$result)"
         return 1
     fi
+    date +%s > "$LAST_ACTIVITY_FILE"
+
+    local idx=2
+    for prompt in "${followups[@]}"; do
+        sleep 20
+        log_message "Burst ${idx}/6: $prompt"
+        run_claude_call "$prompt" 120
+        local r=$?
+        if [ $r -ne 0 ] && [ $r -ne 124 ]; then
+            log_message "WARNING: Follow-up ${idx} failed (exit=$r) — continuing burst anyway"
+        else
+            date +%s > "$LAST_ACTIVITY_FILE"
+        fi
+        idx=$((idx + 1))
+    done
+
+    # Emit the original success line so downstream tooling and existing
+    # log-scraping ("Claude session started successfully") keeps working.
+    log_message "Claude session started successfully with message: $initial_prompt"
+    log_message "Claude session burst completed (initial + ${#followups[@]} follow-ups)"
+    return 0
 }
 
 # Function to calculate next check time
